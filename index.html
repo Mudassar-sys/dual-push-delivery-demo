@@ -184,6 +184,20 @@
   .ck b{color:var(--ink-1);}
   footer{border-top:1px solid var(--grid);padding:34px 0 50px;margin-top:30px;color:var(--ink-3);font-size:13px;text-align:center;}
   footer b{color:var(--ink-2);}
+  .codewrap{padding:0;overflow:hidden;}
+  .tabs{display:flex;flex-wrap:wrap;gap:2px;border-bottom:1px solid var(--grid);background:var(--surface-2);padding:8px 8px 0;}
+  .tab{background:none;border:none;color:var(--ink-3);font-family:inherit;font-size:13px;font-weight:600;padding:10px 16px;cursor:pointer;border-radius:10px 10px 0 0;transition:.15s;}
+  .tab:hover{color:var(--ink-1);background:rgba(255,255,255,0.04);}
+  .tab.active{color:var(--ink-1);background:var(--surface-1);box-shadow:inset 0 -2px 0 var(--fcm);}
+  pre.code{margin:0;padding:22px 24px;overflow-x:auto;font:12.5px/1.75 ui-monospace,Menlo,Consolas,monospace;color:#dfe4ee;background:#0a0c11;}
+  pre.code[hidden]{display:none;}
+  pre.code .cmt{color:#6f7b8f;font-style:italic;}
+  pre.code .kw{color:#8fbdf3;}
+  pre.code .str{color:#e0a175;}
+  pre.code .fn{color:#a9d6a0;}
+  pre.code .hl{background:rgba(57,135,229,0.14);border-left:2px solid var(--fcm);display:block;margin:0 -24px;padding:0 22px;}
+  .code-note{padding:14px 24px;border-top:1px solid var(--grid);font-size:13px;color:var(--ink-2);background:var(--surface-1);}
+  .code-note b{color:var(--ink-1);}
 </style>
 </head>
 <body>
@@ -321,6 +335,112 @@
       <div class="key"><div class="kt"><span class="tick">✓</span> Token drift on iOS</div><div class="kd">APNs token refreshes must reach both systems every time, or one side silently goes deaf. The registration hook updates both in the same call.</div></div>
       <div class="key"><div class="kt"><span class="tick">✓</span> Existing Firebase project reuse</div><div class="kd">The project OneSignal already uses stays untouched. FCM registration is additive. No config file swap, no risk to current delivery.</div></div>
     </div>
+  </div>
+</section>
+<section class="wrap" id="code">
+  <div class="sec-head">
+    <span class="kicker">The actual change</span>
+    <h2>The code that makes it work.</h2>
+    <p>Four small pieces, nothing invasive, no rewrite of what already works. The highlighted lines are the ones that stop duplicates. Everything here gets adapted to your project structure, this is the shape of it.</p>
+  </div>
+  <div class="card codewrap">
+    <div class="tabs">
+      <button class="tab active" data-t="0" onclick="showTab(0)">AndroidManifest.xml</button>
+      <button class="tab" data-t="1" onclick="showTab(1)">PushRouter.java</button>
+      <button class="tab" data-t="2" onclick="showTab(2)">AppDelegate.swift</button>
+      <button class="tab" data-t="3" onclick="showTab(3)">Server payload</button>
+    </div>
+    <pre class="code" data-p="0"><span class="cmt">&lt;!-- One service owns incoming messages. FCM delivers to the --&gt;</span>
+<span class="cmt">&lt;!-- highest priority match, so ours receives everything first. --&gt;</span>
+<span class="hl">&lt;<span class="kw">service</span>
+    android:name=<span class="str">".push.PushRouter"</span>
+    android:exported=<span class="str">"false"</span>&gt;
+    &lt;<span class="kw">intent-filter</span> android:priority=<span class="str">"100"</span>&gt;
+        &lt;<span class="kw">action</span> android:name=<span class="str">"com.google.firebase.MESSAGING_EVENT"</span> /&gt;
+    &lt;/<span class="kw">intent-filter</span>&gt;
+&lt;/<span class="kw">service</span>&gt;</span>
+
+<span class="cmt">&lt;!-- OneSignal stays declared exactly as it is today. --&gt;</span>
+<span class="cmt">&lt;!-- Nothing is removed, nothing is renamed. --&gt;</span></pre>
+    <pre class="code" data-p="1" hidden><span class="kw">public class</span> <span class="fn">PushRouter</span> <span class="kw">extends</span> FirebaseMessagingService {
+
+    <span class="cmt">// Remembers the last few campaign ids we already showed.</span>
+    <span class="kw">private static final</span> Set&lt;String&gt; seen =
+        Collections.newSetFromMap(<span class="kw">new</span> LinkedHashMap&lt;&gt;());
+
+    <span class="kw">@Override</span>
+    <span class="kw">public void</span> <span class="fn">onMessageReceived</span>(RemoteMessage message) {
+
+        <span class="cmt">// 1. OneSignal payloads carry custom.i. Hand them straight back</span>
+        <span class="cmt">//    to the OneSignal SDK so current behaviour is untouched.</span>
+        <span class="hl">        String custom = message.getData().get(<span class="str">"custom"</span>);
+        <span class="kw">if</span> (custom != <span class="kw">null</span> &amp;&amp; <span class="kw">new</span> JSONObject(custom).has(<span class="str">"i"</span>)) {
+            <span class="fn">forwardToOneSignal</span>(message);
+            <span class="kw">return</span>;
+        }</span>
+
+        <span class="cmt">// 2. Same campaign can arrive on both channels. First one wins.</span>
+        <span class="hl">        String dispatchId = message.getData().get(<span class="str">"dispatch_id"</span>);
+        <span class="kw">if</span> (dispatchId != <span class="kw">null</span> &amp;&amp; !seen.add(dispatchId)) {
+            <span class="kw">return</span>; <span class="cmt">// already shown, drop silently</span>
+        }</span>
+
+        <span class="cmt">// 3. Same channel, same icon, same deep link as OneSignal uses,</span>
+        <span class="cmt">//    so a member cannot tell which pipe delivered it.</span>
+        <span class="fn">showNotification</span>(message);
+    }
+
+    <span class="kw">@Override</span>
+    <span class="kw">public void</span> <span class="fn">onNewToken</span>(String token) {
+        <span class="cmt">// Both systems must always hold a fresh token,</span>
+        <span class="cmt">// otherwise one of them silently goes deaf.</span>
+        <span class="hl">        OneSignal.getUser().pushSubscription.optIn();
+        Backend.<span class="fn">registerFcmToken</span>(token);</span>
+    }
+}</pre>
+    <pre class="code" data-p="2" hidden><span class="kw">func</span> <span class="fn">application</span>(_ app: UIApplication,
+    didRegisterForRemoteNotificationsWithDeviceToken token: Data) {
+
+    <span class="cmt">// The device has exactly one APNs token.</span>
+    <span class="cmt">// OneSignal already receives it. We hand the same one to FCM,</span>
+    <span class="cmt">// on the Firebase project that is already in use.</span>
+    <span class="hl">    Messaging.messaging().apnsToken = token</span>
+}
+
+<span class="kw">func</span> <span class="fn">userNotificationCenter</span>(_ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completion: @escaping (UNNotificationPresentationOptions) -&gt; Void) {
+
+    <span class="cmt">// iOS collapses two pushes that share an apns-collapse-id,</span>
+    <span class="cmt">// so the member sees one banner even if both channels fire.</span>
+    <span class="cmt">// This guard is the belt on top of that braces.</span>
+    <span class="hl">    <span class="kw">let</span> id = notification.request.content.userInfo[<span class="str">"dispatch_id"</span>] <span class="kw">as</span>? String
+    <span class="kw">if let</span> id = id, DispatchLog.shared.<span class="fn">alreadyShown</span>(id) {
+        <span class="fn">completion</span>([])
+        <span class="kw">return</span>
+    }</span>
+    <span class="fn">completion</span>([.banner, .sound, .badge])
+}</pre>
+    <pre class="code" data-p="3" hidden><span class="cmt">// Sent from your backend through FCM. The two highlighted values</span>
+<span class="cmt">// are what make a double send harmless on both platforms.</span>
+{
+  <span class="str">"message"</span>: {
+    <span class="str">"token"</span>: <span class="str">"&lt;device token&gt;"</span>,
+    <span class="str">"data"</span>: { <span class="str">"dispatch_id"</span>: <span class="str">"class-reminder-48211"</span> },
+    <span class="str">"notification"</span>: {
+      <span class="str">"title"</span>: <span class="str">"Class reminder"</span>,
+      <span class="str">"body"</span>: <span class="str">"Spinning starts in 45 minutes."</span>
+    },
+<span class="hl">    <span class="str">"android"</span>: { <span class="str">"collapse_key"</span>: <span class="str">"class-reminder-48211"</span> },
+    <span class="str">"apns"</span>: {
+      <span class="str">"headers"</span>: { <span class="str">"apns-collapse-id"</span>: <span class="str">"class-reminder-48211"</span> }
+    }</span>
+  }
+}
+
+<span class="cmt">// The same id is set on the OneSignal side of the campaign.</span>
+<span class="cmt">// One campaign, one id, one notification on the phone.</span></pre>
+    <div class="code-note" id="codeNote"><b>Why this is small on purpose.</b> Nothing existing is deleted. If the new path ever misbehaves, removing one service declaration puts you back exactly where you are today.</div>
   </div>
 </section>
 <section class="wrap" id="cost">
@@ -505,6 +625,11 @@ function setSplit(v){
     svg.appendChild(el('text',{x:cx,y:H-16,'text-anchor':'middle',fill:'#b9bfcc','font-size':13,'font-family':'system-ui,sans-serif'},d.label));
   });
 })();
+function showTab(i){
+  document.querySelectorAll('.tab').forEach(function(t){t.classList.toggle('active', t.dataset.t==String(i))});
+  document.querySelectorAll('pre.code').forEach(function(p){p.hidden = p.dataset.p!=String(i)});
+}
+
 </script>
 </body>
 </html>
